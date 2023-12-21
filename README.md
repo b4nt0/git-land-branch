@@ -81,7 +81,7 @@ and the options are:
 
 | Option       | What it does                                                          |
 | ------------ | --------------------------------------------------------------------- |
-| `--help`     | Displays the help text                                                |
+| `-h`         | Displays the help text                                                |
 | `--push`     | If set, `git-land` would automatically push the changes to the remote |
 | `--verbose`  | Enables verbose output                                                |
 | `--paranoid` | Asks for user confirmation for every write command                    |
