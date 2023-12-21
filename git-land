@@ -1,0 +1,256 @@
+#!/bin/bash
+
+project_root=`echo $(git rev-parse --show-toplevel)`
+lockfile=$project_root/.git-land-in-progress
+touch $lockfile
+
+current_branch=$(git symbolic-ref --short HEAD)
+land_comment="Landed branch $current_branch"
+
+remote=$(git config git-land.remote)
+if [ -z "$remote" ]; then
+  remote='origin'
+fi
+
+target_branch=$(git config git-land.target)
+if [ -z "$target_branch" ]; then
+  target_branch='main'
+fi
+
+show_usage=false
+push=false
+verbose=false
+paranoid=false
+
+function exit_and_cleanup() {
+  rm -f $lockfile
+  if [[ $# == 2 ]]; then
+    printf "$2"
+  fi
+  exit $1
+}
+
+function usage() {
+  echo "$1"
+  echo ""
+  echo "Usage: git land [options] [<comment> [<branch>]]"
+  echo ""
+  echo "  <comment>: the land commit comment (default: Landed branch <branch>)"
+  echo "  <branch>: the branch to land (default: current branch)"
+  echo ""
+  echo "Options:"
+  echo "  -h, --help: show this usage text"
+  echo "  --push: push the changes to remote"
+  echo "  -v, --verbose: extended log output"
+  echo "  --paranoid: ask confirmation for every step"
+  echo ""
+  echo "Settings:"
+  echo "  git-land.remote: remote name (default: origin)"
+  echo "  git-land.target: target branch (default: main)"
+  echo ""
+  echo "Examples:"
+  echo "  git land --paranoid"
+  echo "  git land my-feature"
+  echo ""
+  exit_and_cleanup 1
+}
+
+function handle_error() {
+    echo "Error: $1"
+    log "Checking out $current_branch"
+    if ! git checkout "$current_branch"; then
+        log "Failed. Checking out $target_branch"
+        if ! git checkout "$target_branch"; then
+            log "Failed. Exiting."
+        fi
+    fi
+    exit_and_cleanup 1
+}
+
+function is_clean() {
+    uncommitted=$(git status --porcelain | grep '^[ MADRCU]')
+    if [ -n "$uncommitted" ]; then
+        echo "There are uncommitted changes:"
+        echo "$uncommitted"
+        return 1
+    fi
+
+    # Check for untracked files
+    untracked=$(git status --porcelain | grep '^??' | grep -v '.git-land-in-progress')
+    if [ -n "$untracked" ]; then
+        echo "There are untracked files:"
+        echo "$untracked"
+        return 1
+    fi
+
+    return 0
+}
+
+function log() {
+    if [ "$verbose" = "true" ]; then
+            original_color=$(tput sgr0)
+            grey=$(tput setaf 7)
+            echo $grey 
+            echo $1
+            echo $original_color
+    fi
+}
+
+function run_command() {
+    local command=$@
+
+    if [ "$verbose" = "true" ]; then
+        echo "Executing $commmand"
+    fi
+
+    original_color=$(tput sgr0)
+    grey=$(tput setaf 7)
+    echo "$grey"
+    eval "$command"
+    local status=$?
+    echo "$original_color"
+    return $status
+}
+
+function run_dangerous_command() {
+    local command=$@
+
+    if [ "$verbose" = "true" ] || [ "$paranoid" = "true" ]; then
+        echo "Executing $command"
+    fi
+
+    if [ "$paranoid" = "true" ]; then
+        echo -n "Do you want to proceed? [yN]"
+        read -n 1 -r
+
+        if [[ -z $REPLY ]]; then
+            REPLY='N'
+        fi
+
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            handle_error "Land workflow aborted"
+        fi
+    fi
+
+    original_color=$(tput sgr0)
+    grey=$(tput setaf 7)
+    echo "$grey"
+    eval "$command"
+    local status=$?
+    echo "$original_color"
+    return $status
+}
+
+args=()
+while [[ $# > 0 ]]; do
+  arg="$1"
+
+  case $arg in
+    -h|--help)
+      show_usage=true
+      shift
+      ;;
+    --push)
+      push=true
+      shift
+      ;;
+    -v|--verbose)
+      verbose=true
+      shift
+      ;;  
+    --paranoid)
+      paranoid=true
+      shift
+      ;;  
+    *)
+      args[${#args[@]}]=$arg
+      shift
+      ;;
+  esac
+done
+
+if [ "$show_usage" = "true" ]; then
+    usage
+fi
+
+case ${#args[@]} in
+  0)
+    ;;
+  1)
+    land_comment=${args[0]}
+    ;;
+  2)
+    land_comment=${args[0]}
+    current_branch=${args[1]}
+    log "Checking out $current_branch"
+    if ! run_dangerous_command "git checkout $current_branch"; then
+        handle_error "Cannot checkout the landing branch"
+    fi
+    ;;
+  *)
+    usage "Too many arguments"
+    ;;
+esac
+
+# Check if we are not on the target branch
+log "Checking if we are not trying to land $target_branch"
+if [ "$current_branch" = "$target_branch" ]; then
+    echo "Already on the target branch. Exiting."
+    exit_and_cleanup 0
+fi
+
+# Check if the current branch is clean
+log "Checking if there are uncommitted changes"
+if ! is_clean; then
+    exit_and_cleanup 1
+fi
+
+# Updating target and attempting fast-forward
+log "Attempting to fast-forward $target_branch"
+run_command "git fetch $remote \"$target_branch\""
+if ! run_command "git checkout \"$target_branch\"" || ! run_dangerous_command "git merge --ff-only origin/$target_branch"; then
+    handle_error "Cannot fast-forward the target branch"
+fi
+
+# Rebase the current branch based on target
+log "Attempting to rebase $current_branch based on $target_branch"
+if ! run_command "git checkout $current_branch" || ! run_dangerous_command "git rebase $target_branch"; then
+    run_command "git rebase --abort"
+    handle_error "Rebase failed. Possible conflicts."
+fi
+
+# Switch to target and merge with squash
+log "Switching to $target_branch"
+run_command "git checkout $target_branch"
+log "Attempting squash merge"
+target_last_commit=$(git rev-parse HEAD)
+log "Backing up last commit $target_last_commit on $target_branch"
+if ! run_dangerous_command "git merge --squash $current_branch"; then
+    log "Squash merge failed, rolling back"
+    run_command "git reset --hard $target_last_commit"
+    handle_error "Squash merge failed."
+fi
+
+# Commit the changes
+log "Committing the landed changes to $target_branch"
+run_dangerous_command "git commit -m \"$land_comment\""
+
+# Clean up the landing branch
+log "Deleting $current_branch"
+run_dangerous_command "git branch -D $current_branch"
+
+# Push to origin, unless a no-push option is provided
+if [ "$push" = "true" ]; then
+    log "Pushing $target_branch"
+    run_dangerous_command "git push $remote $target_branch"
+    log "Pushing the deletion of $current_branch"
+    run_dangerous_command "git push $remote --delete $current_branch"
+else
+    echo "Not pushing the changes"
+    echo "If you want to push manually, run:"
+    echo "    git push $remote $target_branch"
+    echo "    git push $remote --delete $current_branch"
+fi
+
+echo "Branch $current_branch landed successfully to $remote/$target_branch."
+exit_and_cleanup 0
