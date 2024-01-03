@@ -47,6 +47,7 @@ function usage() {
   echo "Settings:"
   echo "  git-land.remote: remote name (default: origin)"
   echo "  git-land.target: target branch (default: main)"
+  echo "  (for example, git config git-land.target master)"
   echo ""
   echo "Examples:"
   echo "  git land --paranoid"
