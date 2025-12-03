@@ -209,7 +209,7 @@ fi
 # Updating target and attempting fast-forward
 log "Attempting to fast-forward $target_branch"
 run_command "git fetch $remote \"$target_branch\""
-if ! run_command "git checkout \"$target_branch\"" || ! run_dangerous_command "git merge --ff-only origin/$target_branch"; then
+if ! run_command "git checkout \"$target_branch\"" || ! run_dangerous_command "git merge --ff-only $remote/$target_branch"; then
     handle_error "Cannot fast-forward the target branch"
 fi
 
